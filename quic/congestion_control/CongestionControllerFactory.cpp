@@ -14,7 +14,7 @@
 #include <quic/congestion_control/Copa.h>
 #include <quic/congestion_control/NewReno.h>
 #include <quic/congestion_control/QuicCubic.h>
-
+#include <quic/congestion_control/NN.h>
 #include <memory>
 
 namespace quic {
@@ -24,6 +24,9 @@ DefaultCongestionControllerFactory::makeCongestionController(
     CongestionControlType type) {
   std::unique_ptr<CongestionController> congestionController;
   switch (type) {
+     case CongestionControlType::NN:
+      congestionController = std::make_unique<NN>(conn);
+      break;
     case CongestionControlType::NewReno:
       congestionController = std::make_unique<NewReno>(conn);
       break;

@@ -18,6 +18,8 @@ add_library(
   Pacer.cpp
   ServerCongestionControllerFactory.cpp
   TokenlessPacer.cpp
+  NN.cpp
+  utils/TFUtils.cpp
 )
 
 target_include_directories(
@@ -39,7 +41,8 @@ add_dependencies(
   mvfst_state_machine
   mvfst_state_functions
 )
-
+find_package(HDF5 REQUIRED COMPONENTS C CXX)
+include_directories(${HDF5_INCLUDE_DIRS})
 target_link_libraries(
   mvfst_cc_algo PUBLIC
   Folly::folly
@@ -48,6 +51,9 @@ target_link_libraries(
   mvfst_state_machine
   mvfst_state_functions
   ${LIBCCP_LIBRARY}
+  /usr/local/lib/libtensorflow.so
+  ${HDF5_CXX_LIBRARIES} ${HDF5_LIBRARIES}
+
 )
 
 file(

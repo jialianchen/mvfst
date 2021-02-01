@@ -41,8 +41,8 @@ class EchoServerTransportFactory : public quic::QuicServerTransportFactory {
       folly::EventBase* evb,
       std::unique_ptr<folly::AsyncUDPSocket> sock,
       const folly::SocketAddress&,
-      std::shared_ptr<const fizz::server::FizzServerContext>
-          ctx) noexcept override {
+      std::shared_ptr<const fizz::server::FizzServerContext> ctx) noexcept
+      override {
     CHECK_EQ(evb, sock->getEventBase());
     auto echoHandler = std::make_unique<EchoHandler>(evb, prEnabled_);
     auto transport = quic::QuicServerTransport::make(
@@ -72,6 +72,11 @@ class EchoServer {
         std::make_unique<EchoServerTransportFactory>(prEnabled_));
     server_->setTransportStatsCallbackFactory(
         std::make_unique<LogQuicStatsFactory>());
+    TransportSettings transportSettings;
+    transportSettings.defaultCongestionController = CongestionControlType::NN;
+    auto ccFactory = std::make_shared<DefaultCongestionControllerFactory>();
+    server_->setCongestionControllerFactory(ccFactory);
+    server_->setTransportSettings(transportSettings);
     auto serverCtx = quic::test::createServerCtx();
     serverCtx->setClock(std::make_shared<fizz::SystemClock>());
     server_->setFizzContext(serverCtx);

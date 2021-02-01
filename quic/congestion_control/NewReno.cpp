@@ -5,7 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  *
  */
-
+//#include <glog/logging.h>
 #include <quic/congestion_control/NewReno.h>
 #include <quic/congestion_control/CongestionControlFunctions.h>
 #include <quic/logging/QLoggerConstants.h>
@@ -23,6 +23,7 @@ NewReno::NewReno(QuicConnectionStateBase& conn)
       conn_.udpSendPacketLen,
       conn_.transportSettings.maxCwndInMss,
       conn_.transportSettings.minCwndInMss);
+       //VLOG(google::INFO)<<"newreno start";
 }
 
 void NewReno::onRemoveBytesFromInflight(uint64_t bytes) {

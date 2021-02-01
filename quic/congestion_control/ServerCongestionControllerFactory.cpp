@@ -8,6 +8,7 @@
 
 #include <quic/congestion_control/ServerCongestionControllerFactory.h>
 
+#include <quic/congestion_control/NN.h>
 #include <quic/congestion_control/Bbr.h>
 #include <quic/congestion_control/BbrBandwidthSampler.h>
 #include <quic/congestion_control/BbrRttSampler.h>
@@ -25,6 +26,9 @@ ServerCongestionControllerFactory::makeCongestionController(
     CongestionControlType type) {
   std::unique_ptr<CongestionController> congestionController;
   switch (type) {
+    case CongestionControlType::NN:
+      congestionController = std::make_unique<NN>(conn);
+      break;
     case CongestionControlType::NewReno:
       congestionController = std::make_unique<NewReno>(conn);
       break;
