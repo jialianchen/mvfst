@@ -254,6 +254,11 @@ class QuicTransportBase : public QuicSocket {
   setKnob(uint64_t knobSpace, uint64_t knobId, Buf knobBlob) override;
 
   /**
+   * Can Knob Frames be exchanged with the peer on this connection?
+   */
+  FOLLY_NODISCARD bool isKnobSupported() const override;
+
+  /**
    * Set factory to create specific congestion controller instances
    * for a given connection
    */
@@ -311,6 +316,11 @@ class QuicTransportBase : public QuicSocket {
   virtual std::shared_ptr<QuicTransportBase> sharedGuard() = 0;
 
   bool isPartiallyReliableTransport() const override;
+
+  folly::Expected<folly::Unit, LocalErrorCode> setStreamPriority(
+      StreamId id,
+      PriorityLevel level,
+      bool incremental) override;
 
   /**
    * Invoke onCanceled on all the delivery callbacks registered for streamId.
@@ -729,7 +739,7 @@ class QuicTransportBase : public QuicSocket {
   /**
    * Callback when we receive a transport knob
    */
-  void onTransportKnobs(Buf knobBlob);
+  virtual void onTransportKnobs(Buf knobBlob);
 
   struct ByteEventDetail {
     ByteEventDetail(uint64_t offsetIn, ByteEventCallback* callbackIn)

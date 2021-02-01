@@ -37,6 +37,7 @@ QuicServerTransport::QuicServerTransport(
   // correctly.
   // conn_->nextSequenceNum = folly::Random::secureRandom<PacketNum>();
   setConnectionCallback(&cb);
+  registerAllTransportKnobParamHandlers();
 }
 
 QuicServerTransport::~QuicServerTransport() {
@@ -375,6 +376,25 @@ void QuicServerTransport::onCryptoEventAvailable() noexcept {
   }
 }
 
+void QuicServerTransport::handleTransportKnobParams(
+    const TransportKnobParams& params) {
+  for (const auto& param : params) {
+    auto maybeParamHandler = transportKnobParamHandlers_.find(param.id);
+    if (maybeParamHandler != transportKnobParamHandlers_.end()) {
+      (maybeParamHandler->second)(serverConn_, param.val);
+      QUIC_STATS(
+          conn_->statsCallback,
+          onTransportKnobApplied,
+          QuicTransportStatsCallback::paramIdToTransportKnobType(param.id));
+    } else {
+      QUIC_STATS(
+          conn_->statsCallback,
+          onTransportKnobError,
+          QuicTransportStatsCallback::paramIdToTransportKnobType(param.id));
+    }
+  }
+}
+
 void QuicServerTransport::processPendingData(bool async) {
   // The case when both 0-rtt and 1-rtt pending data are ready to be processed
   // but neither had been shouldn't happen
@@ -543,6 +563,12 @@ void QuicServerTransport::maybeStartD6DProbing() {
   }
 }
 
+void QuicServerTransport::registerTransportKnobParamHandler(
+    uint64_t paramId,
+    std::function<void(QuicServerConnectionState*, uint64_t)>&& handler) {
+  transportKnobParamHandlers_.emplace(paramId, std::move(handler));
+}
+
 void QuicServerTransport::setBufAccessor(BufAccessor* bufAccessor) {
   CHECK(bufAccessor);
   conn_->bufAccessor = bufAccessor;
@@ -561,6 +587,49 @@ QuicServerTransport::getPeerCertificate() const {
     return handshakeLayer->getState().clientCert();
   }
   return nullptr;
+}
+
+void QuicServerTransport::onTransportKnobs(Buf knobBlob) {
+  if (knobBlob->length() > 0) {
+    std::string serializedKnobs = std::string(
+        reinterpret_cast<const char*>(knobBlob->data()), knobBlob->length());
+    VLOG(4) << "Received transport knobs: " << serializedKnobs;
+    auto params = parseTransportKnobs(serializedKnobs);
+    if (params.hasValue()) {
+      handleTransportKnobParams(*params);
+    } else {
+      QUIC_STATS(
+          conn_->statsCallback,
+          onTransportKnobError,
+          QuicTransportStatsCallback::TransportKnobType::UNKNOWN);
+    }
+  }
+}
+
+void QuicServerTransport::registerAllTransportKnobParamHandlers() {
+  registerTransportKnobParamHandler(
+      static_cast<uint64_t>(
+          TransportKnobParamId::ZERO_PMTU_BLACKHOLE_DETECTION),
+      [](QuicServerConnectionState* server_conn, uint64_t val) {
+        CHECK(server_conn);
+        if (static_cast<bool>(val)) {
+          server_conn->d6d.noBlackholeDetection = true;
+          LOG(INFO)
+              << "Knob param received, pmtu blackhole detection is turned off";
+        }
+      });
+
+  registerTransportKnobParamHandler(
+      static_cast<uint64_t>(
+          TransportKnobParamId::FORCIBLY_SET_UDP_PAYLOAD_SIZE),
+      [](QuicServerConnectionState* server_conn, uint64_t val) {
+        CHECK(server_conn);
+        if (static_cast<bool>(val)) {
+          server_conn->udpSendPacketLen = server_conn->peerMaxUdpPayloadSize;
+          LOG(INFO)
+              << "Knob param received, udpSendPacketLen is forcibly set to max UDP payload size advertised by peer";
+        }
+      });
 }
 
 } // namespace quic

@@ -55,6 +55,8 @@ QuicClientTransport::QuicClientTransport(
   conn_->selfConnectionIds.emplace_back(srcConnId, kInitialSequenceNumber);
   clientConn_->initialDestinationConnectionId =
       ConnectionId::createRandom(kMinInitialDestinationConnIdLength);
+  clientConn_->originalDestinationConnectionId =
+      clientConn_->initialDestinationConnectionId;
   conn_->clientChosenDestConnectionId =
       clientConn_->initialDestinationConnectionId;
   VLOG(4) << "initial dcid: "
@@ -136,7 +138,7 @@ void QuicClientTransport::processPacketData(
       packetQueue, conn_->ackStates, conn_->clientConnectionId->size());
   StatelessReset* statelessReset = parsedPacket.statelessReset();
   if (statelessReset) {
-    auto& token = clientConn_->statelessResetToken;
+    const auto& token = clientConn_->statelessResetToken;
     if (statelessReset->token == token) {
       VLOG(4) << "Received Stateless Reset " << *this;
       conn_->peerConnectionError = std::make_pair(
@@ -159,7 +161,7 @@ void QuicClientTransport::processPacketData(
     }
 
     const ConnectionId* originalDstConnId =
-        &(*clientConn_->initialDestinationConnectionId);
+        &(*clientConn_->originalDestinationConnectionId);
 
     if (!clientConn_->clientHandshakeLayer->verifyRetryIntegrityTag(
             *originalDstConnId, *retryPacket)) {
@@ -580,7 +582,7 @@ void QuicClientTransport::processPacketData(
             maxStreamsBidi.value_or(0),
             maxStreamsUni.value_or(0));
 
-        auto& statelessResetToken = clientConn_->statelessResetToken;
+        const auto& statelessResetToken = clientConn_->statelessResetToken;
         if (statelessResetToken) {
           conn_->readCodec->setStatelessResetToken(*statelessResetToken);
         }
@@ -973,7 +975,7 @@ void QuicClientTransport::onDataAvailable(
   auto packetReceiveTime = Clock::now();
   Buf data = std::move(readBuffer_);
 
-  if (params.gro_ <= 0) {
+  if (params.gro <= 0) {
     if (truncated) {
       // This is an error, drop the packet.
       QUIC_STATS(
@@ -1000,7 +1002,7 @@ void QuicClientTransport::onDataAvailable(
     // AsyncUDPSocket::handleRead() sets the len to be the
     // buffer size in case the data is truncated
     if (truncated) {
-      auto delta = len % params.gro_;
+      auto delta = len % params.gro;
       len -= delta;
 
       QUIC_STATS(
@@ -1016,21 +1018,21 @@ void QuicClientTransport::onDataAvailable(
 
     NetworkData networkData;
     networkData.receiveTimePoint = packetReceiveTime;
-    networkData.packets.reserve((len + params.gro_ - 1) / params.gro_);
+    networkData.packets.reserve((len + params.gro - 1) / params.gro);
     size_t remaining = len;
     size_t offset = 0;
     while (remaining) {
-      if (static_cast<int>(remaining) > params.gro_) {
+      if (static_cast<int>(remaining) > params.gro) {
         auto tmp = data->cloneOne();
         // start at offset
         tmp->trimStart(offset);
         // the actual len is len - offset now
-        // leave params.gro_ bytes
-        tmp->trimEnd(len - offset - params.gro_);
-        DCHECK_EQ(tmp->length(), params.gro_);
+        // leave params.gro bytes
+        tmp->trimEnd(len - offset - params.gro);
+        DCHECK_EQ(tmp->length(), params.gro);
 
-        offset += params.gro_;
-        remaining -= params.gro_;
+        offset += params.gro;
+        remaining -= params.gro;
         networkData.packets.emplace_back(std::move(tmp));
       } else {
         // do not clone the last packet
@@ -1075,17 +1077,19 @@ void QuicClientTransport::recvMsg(
     }
 
     int flags = 0;
-    int gro = -1;
+    folly::AsyncUDPSocket::ReadCallback::OnDataAvailableParams params;
     struct msghdr msg {};
     msg.msg_name = rawAddr;
     msg.msg_namelen = size_t(addrLen);
     msg.msg_iov = &vec;
     msg.msg_iovlen = 1;
 #ifdef FOLLY_HAVE_MSG_ERRQUEUE
-    char control[CMSG_SPACE(sizeof(uint16_t))] = {};
     bool useGRO = sock.getGRO() > 0;
+    bool useTS = sock.getTimestamping() > 0;
+    char control[folly::AsyncUDPSocket::ReadCallback::OnDataAvailableParams::
+                     kCmsgSpace] = {};
 
-    if (useGRO) {
+    if (useGRO || useTS) {
       msg.msg_control = control;
       msg.msg_controllen = sizeof(control);
 
@@ -1118,19 +1122,13 @@ void QuicClientTransport::recvMsg(
     }
 #ifdef FOLLY_HAVE_MSG_ERRQUEUE
     if (useGRO) {
-      for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg != nullptr;
-           cmsg = CMSG_NXTHDR(&msg, cmsg)) {
-        if (cmsg->cmsg_level == SOL_UDP && cmsg->cmsg_type == UDP_GRO) {
-          gro = *((uint16_t*)CMSG_DATA(cmsg));
-          break;
-        }
-      }
+      folly::AsyncUDPSocket::fromMsg(params, msg);
 
       // truncated
       if ((size_t)ret > readBufferSize) {
         ret = readBufferSize;
-        if (gro > 0) {
-          ret = ret - ret % gro;
+        if (params.gro > 0) {
+          ret = ret - ret % params.gro;
         }
       }
     }
@@ -1143,25 +1141,25 @@ void QuicClientTransport::recvMsg(
     }
     VLOG(10) << "Got data from socket peer=" << *server << " len=" << bytesRead;
     readBuffer->append(bytesRead);
-    if (gro > 0) {
+    if (params.gro > 0) {
       size_t len = bytesRead;
       size_t remaining = len;
       size_t offset = 0;
       size_t totalNumPackets =
-          networkData.packets.size() + ((len + gro - 1) / gro);
+          networkData.packets.size() + ((len + params.gro - 1) / params.gro);
       networkData.packets.reserve(totalNumPackets);
       while (remaining) {
-        if (static_cast<int>(remaining) > gro) {
+        if (static_cast<int>(remaining) > params.gro) {
           auto tmp = readBuffer->cloneOne();
           // start at offset
           tmp->trimStart(offset);
           // the actual len is len - offset now
           // leave gro bytes
-          tmp->trimEnd(len - offset - gro);
-          DCHECK_EQ(tmp->length(), gro);
+          tmp->trimEnd(len - offset - params.gro);
+          DCHECK_EQ(tmp->length(), params.gro);
 
-          offset += gro;
-          remaining -= gro;
+          offset += params.gro;
+          remaining -= params.gro;
           networkData.packets.emplace_back(std::move(tmp));
         } else {
           // do not clone the last packet
@@ -1198,8 +1196,11 @@ void QuicClientTransport::recvMmsg(
   int flags = 0;
 #ifdef FOLLY_HAVE_MSG_ERRQUEUE
   bool useGRO = sock.getGRO() > 0;
-  std::vector<std::array<char, CMSG_SPACE(sizeof(uint16_t))>> controlVec(
-      useGRO ? numPackets : 0);
+  bool useTS = sock.getTimestamping() > 0;
+  std::vector<std::array<
+      char,
+      folly::AsyncUDPSocket::ReadCallback::OnDataAvailableParams::kCmsgSpace>>
+      controlVec(useGRO ? numPackets : 0);
 
   // we need to consider MSG_TRUNC too
   if (useGRO) {
@@ -1229,7 +1230,8 @@ void QuicClientTransport::recvMmsg(
     msg->msg_iov = &iovecs[i];
     msg->msg_iovlen = 1;
 #ifdef FOLLY_HAVE_MSG_ERRQUEUE
-    if (useGRO) {
+    if (useGRO || useTS) {
+      ::memset(controlVec[i].data(), 0, controlVec[i].size());
       msg->msg_control = controlVec[i].data();
       msg->msg_controllen = controlVec[i].size();
     }
@@ -1268,23 +1270,16 @@ void QuicClientTransport::recvMmsg(
       freeBufs.emplace_back(std::move(readBuffers[i]));
       continue;
     }
-    int gro = -1;
+    folly::AsyncUDPSocket::ReadCallback::OnDataAvailableParams params;
 #ifdef FOLLY_HAVE_MSG_ERRQUEUE
-    if (useGRO) {
-      for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msgs[i].msg_hdr);
-           cmsg != nullptr;
-           cmsg = CMSG_NXTHDR(&msgs[i].msg_hdr, cmsg)) {
-        if (cmsg->cmsg_level == SOL_UDP && cmsg->cmsg_type == UDP_GRO) {
-          gro = *((uint16_t*)CMSG_DATA(cmsg));
-          break;
-        }
-      }
+    if (useGRO || useTS) {
+      folly::AsyncUDPSocket::fromMsg(params, msgs[i].msg_hdr);
 
       // truncated
       if (bytesRead > readBufferSize) {
         bytesRead = readBufferSize;
-        if (gro > 0) {
-          bytesRead = bytesRead - bytesRead % gro;
+        if (params.gro > 0) {
+          bytesRead = bytesRead - bytesRead % params.gro;
         }
       }
     }
@@ -1299,25 +1294,25 @@ void QuicClientTransport::recvMmsg(
 
     VLOG(10) << "Got data from socket peer=" << *server << " len=" << bytesRead;
     readBuffers[i]->append(bytesRead);
-    if (gro > 0) {
+    if (params.gro > 0) {
       size_t len = bytesRead;
       size_t remaining = len;
       size_t offset = 0;
       size_t totalNumPackets =
-          networkData.packets.size() + ((len + gro - 1) / gro);
+          networkData.packets.size() + ((len + params.gro - 1) / params.gro);
       networkData.packets.reserve(totalNumPackets);
       while (remaining) {
-        if (static_cast<int>(remaining) > gro) {
+        if (static_cast<int>(remaining) > params.gro) {
           auto tmp = readBuffers[i]->cloneOne();
           // start at offset
           tmp->trimStart(offset);
           // the actual len is len - offset now
           // leave gro bytes
-          tmp->trimEnd(len - offset - gro);
-          DCHECK_EQ(tmp->length(), gro);
+          tmp->trimEnd(len - offset - params.gro);
+          DCHECK_EQ(tmp->length(), params.gro);
 
-          offset += gro;
-          remaining -= gro;
+          offset += params.gro;
+          remaining -= params.gro;
           networkData.packets.emplace_back(std::move(tmp));
         } else {
           // do not clone the last packet

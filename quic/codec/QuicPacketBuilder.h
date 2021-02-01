@@ -365,6 +365,68 @@ class VersionNegotiationPacketBuilder {
   std::unique_ptr<folly::IOBuf> data_;
 };
 
+/*
+ * Used to construct a pseudo-retry packet, as described in the QUIC-TLS
+ * draft 29.
+ */
+class PseudoRetryPacketBuilder {
+ public:
+  PseudoRetryPacketBuilder(
+      uint8_t initialByte,
+      ConnectionId sourceConnectionId,
+      ConnectionId destinationConnectionId,
+      ConnectionId originalDestinationConnectionId,
+      QuicVersion quicVersion,
+      Buf&& token);
+
+  Buf buildPacket() &&;
+
+ private:
+  void writePseudoRetryPacket();
+
+  Buf packetBuf_;
+
+  uint8_t initialByte_;
+  ConnectionId sourceConnectionId_;
+  ConnectionId destinationConnectionId_;
+  ConnectionId originalDestinationConnectionId_;
+  QuicVersion quicVersion_;
+  Buf token_;
+};
+
+class RetryPacketBuilder {
+ public:
+  RetryPacketBuilder(
+      ConnectionId sourceConnectionId,
+      ConnectionId destinationConnectionId,
+      QuicVersion quicVersion,
+      std::string&& retryToken,
+      Buf&& integrityTag);
+
+  uint32_t remainingSpaceInPkt();
+
+  Buf buildPacket() &&;
+
+  /**
+   * Whether the RetryPacketBuilder is able to build a packet. This should be
+   * checked right after the creation of the RetryPacketBuilder.
+   */
+  FOLLY_NODISCARD bool canBuildPacket() const noexcept;
+
+ private:
+  void writeRetryPacket();
+
+  Buf packetBuf_;
+
+  ConnectionId sourceConnectionId_;
+  ConnectionId destinationConnectionId_;
+  QuicVersion quicVersion_;
+  std::string retryToken_;
+  Buf integrityTag_;
+
+  uint32_t remainingBytes_;
+};
+
 class StatelessResetPacketBuilder {
  public:
   StatelessResetPacketBuilder(

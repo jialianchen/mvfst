@@ -429,7 +429,7 @@ QuicClientTransportIntegrationTest::sendRequestAndResponse(
       .WillByDefault(Invoke([streamData](auto, auto err) mutable {
         streamData->setException(err);
       }));
-  return streamData->promise.getFuture().within(10s);
+  return streamData->promise.getFuture().within(20s);
 }
 
 void QuicClientTransportIntegrationTest::sendRequestAndResponseAndWait(
@@ -1300,10 +1300,6 @@ class FakeOneRttHandshakeLayer : public FizzClientHandshake {
   const folly::Optional<std::string>& getApplicationProtocol() const override {
     throw std::runtime_error("getApplicationProtocol not implemented");
   }
-  std::unique_ptr<Aead> getRetryPacketCipher() override {
-    FizzClientHandshake fizzClientHandshake(nullptr, nullptr);
-    return fizzClientHandshake.getRetryPacketCipher();
-  }
   void processSocketData(folly::IOBufQueue&) override {
     throw std::runtime_error("processSocketData not implemented");
   }
@@ -1431,7 +1427,7 @@ class QuicClientTransportTest : public Test {
 
   virtual void setUpSocketExpectations() {
     EXPECT_CALL(*sock, setReuseAddr(false));
-    EXPECT_CALL(*sock, bind(_));
+    EXPECT_CALL(*sock, bind(_, _));
     EXPECT_CALL(*sock, dontFragment(true));
     EXPECT_CALL(*sock, setErrMessageCallback(client.get()));
     EXPECT_CALL(*sock, resumeRead(client.get()));
@@ -1870,7 +1866,7 @@ TEST_F(QuicClientTransportTest, onNetworkSwitchReplaceAfterHandshake) {
   auto newSocketPtr = newSocket.get();
   EXPECT_CALL(*sock, pauseRead());
   EXPECT_CALL(*sock, close());
-  EXPECT_CALL(*newSocketPtr, bind(_));
+  EXPECT_CALL(*newSocketPtr, bind(_, _));
   EXPECT_CALL(*newSocketPtr, close());
 
   client->setQLogger(mockQLogger);
@@ -1886,7 +1882,7 @@ TEST_F(QuicClientTransportTest, onNetworkSwitchReplaceNoHandshake) {
   auto newSocketPtr = newSocket.get();
   auto mockQLogger = std::make_shared<MockQLogger>(VantagePoint::Client);
   EXPECT_CALL(*mockQLogger, addConnectionMigrationUpdate(true)).Times(0);
-  EXPECT_CALL(*newSocketPtr, bind(_)).Times(0);
+  EXPECT_CALL(*newSocketPtr, bind(_, _)).Times(0);
   client->onNetworkSwitch(std::move(newSocket));
   client->closeNow(folly::none);
 }
@@ -2309,9 +2305,9 @@ class QuicClientTransportHappyEyeballsTest : public QuicClientTransportTest {
     auto& conn = client->getConn();
 
     EXPECT_CALL(*sock, write(firstAddress, _));
-    EXPECT_CALL(*secondSock, bind(_))
+    EXPECT_CALL(*secondSock, bind(_, _))
         .WillOnce(Invoke(
-            [](const folly::SocketAddress&) { throw std::exception(); }));
+            [](const folly::SocketAddress&, auto) { throw std::exception(); }));
     client->start(&clientConnCallback);
     EXPECT_EQ(conn.peerAddress, firstAddress);
     EXPECT_EQ(conn.happyEyeballsState.secondPeerAddress, secondAddress);
@@ -4453,6 +4449,7 @@ TEST_F(QuicClientTransportVersionAndRetryTest, RetryPacket) {
   client->getNonConstConn().qLogger = qLogger;
   client->getNonConstConn().readCodec->setClientConnectionId(clientConnId);
   client->getNonConstConn().initialDestinationConnectionId = initialDstConnId;
+  client->getNonConstConn().originalDestinationConnectionId = initialDstConnId;
 
   StreamId streamId = *client->createBidirectionalStream();
   auto write = IOBuf::copyBuffer("ice cream");
@@ -4476,12 +4473,12 @@ TEST_F(QuicClientTransportVersionAndRetryTest, RetryPacket) {
 
   std::string retryToken = "token";
   std::string integrityTag =
-      "\x1e\x5e\xc5\xb0\x14\xcb\xb1\xf0\xfd\x93\xdf\x40\x48\xc4\x46\xa6";
+      "\xd1\x69\x26\xd8\x1f\x6f\x9c\xa2\x95\x3a\x8a\xa4\x57\x5e\x1e\x49";
 
   folly::IOBuf retryPacketBuf;
   BufAppender appender(&retryPacketBuf, 100);
   appender.writeBE<uint8_t>(0xFF);
-  appender.writeBE<QuicVersionType>(static_cast<QuicVersionType>(0xFF000019));
+  appender.writeBE<QuicVersionType>(static_cast<QuicVersionType>(0xFF00001D));
   appender.writeBE<uint8_t>(clientConnId.size());
   appender.writeBE<uint8_t>(serverConnIdVec.size());
   appender.push(serverConnIdVec.data(), serverConnIdVec.size());
@@ -4737,14 +4734,10 @@ TEST_F(QuicClientTransportAfterStartTest, ResetClearsPendingLoss) {
       CHECK_NOTNULL(findPacketWithStream(client->getNonConstConn(), streamId));
   markPacketLoss(client->getNonConstConn(), *forceLossPacket, false);
   auto& pendingLossStreams = client->getConn().streamManager->lossStreams();
-  auto it =
-      std::find(pendingLossStreams.begin(), pendingLossStreams.end(), streamId);
-  ASSERT_TRUE(it != pendingLossStreams.end());
+  ASSERT_TRUE(pendingLossStreams.count(streamId) > 0);
 
   client->resetStream(streamId, GenericApplicationErrorCode::UNKNOWN);
-  it =
-      std::find(pendingLossStreams.begin(), pendingLossStreams.end(), streamId);
-  ASSERT_TRUE(it == pendingLossStreams.end());
+  ASSERT_TRUE(pendingLossStreams.count(streamId) == 0);
 }
 
 TEST_F(QuicClientTransportAfterStartTest, LossAfterResetStream) {
@@ -4766,9 +4759,7 @@ TEST_F(QuicClientTransportAfterStartTest, LossAfterResetStream) {
       client->getNonConstConn().streamManager->getStream(streamId));
   ASSERT_TRUE(stream->lossBuffer.empty());
   auto& pendingLossStreams = client->getConn().streamManager->lossStreams();
-  auto it =
-      std::find(pendingLossStreams.begin(), pendingLossStreams.end(), streamId);
-  ASSERT_TRUE(it == pendingLossStreams.end());
+  ASSERT_TRUE(pendingLossStreams.count(streamId) == 0);
 }
 
 TEST_F(QuicClientTransportAfterStartTest, SendResetAfterEom) {

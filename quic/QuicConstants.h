@@ -115,6 +115,14 @@ constexpr uint64_t kDefaultQuicTransportKnobSpace = 0xfaceb001;
 // Default knob id for transport knobs
 constexpr uint64_t kDefaultQuicTransportKnobId = 1;
 
+enum class TransportKnobParamId : uint64_t {
+  // Disabling pmtu blackhole detection
+  ZERO_PMTU_BLACKHOLE_DETECTION = 0x8830,
+  // Force udp payload size to be equal to max
+  // udp payload size
+  FORCIBLY_SET_UDP_PAYLOAD_SIZE = 0xba92,
+};
+
 enum class FrameType : uint64_t {
   PADDING = 0x00,
   PING = 0x01,
@@ -240,6 +248,9 @@ enum class QuicNodeType : bool {
 enum class QuicVersion : uint32_t {
   VERSION_NEGOTIATION = 0x00000000,
   MVFST_D24 = 0xfaceb001,
+  // Before updating the MVFST version, please check
+  // QuicTransportBase::isKnobSupported() and make sure that knob support is not
+  // broken.
   MVFST = 0xfaceb002,
   QUIC_DRAFT_LEGACY = 0xff00001b, // Draft-27
   QUIC_DRAFT = 0xff00001d, // Draft-29
@@ -585,5 +596,9 @@ enum class DataPathType : uint8_t {
   ChainedMemory = 0,
   ContinuousMemory = 1,
 };
+
+// Stream priority level, can only be in [0, 7]
+using PriorityLevel = uint8_t;
+constexpr uint8_t kDefaultMaxPriority = 7;
 
 } // namespace quic

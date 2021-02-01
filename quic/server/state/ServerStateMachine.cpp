@@ -89,8 +89,9 @@ void recoverOrResetCongestionAndRttState(
   }
 }
 
-void setExperimentalSettings(QuicServerConnectionState& /*conn*/) {
-  // Currently nothing.
+void setExperimentalSettings(QuicServerConnectionState& conn) {
+  conn.lossState.reorderingThreshold =
+      std::numeric_limits<decltype(conn.lossState.reorderingThreshold)>::max();
 }
 } // namespace
 
@@ -191,6 +192,7 @@ void processClientInitialParams(
   uint64_t maxUdpPayloadSize = kDefaultMaxUDPPayload;
   if (packetSize) {
     maxUdpPayloadSize = std::min(*packetSize, maxUdpPayloadSize);
+    conn.peerMaxUdpPayloadSize = maxUdpPayloadSize;
     if (conn.transportSettings.canIgnorePathMTU) {
       if (*packetSize > kDefaultMaxUDPPayload) {
         // A good peer should never set oversized limit, so to be safe we
@@ -231,6 +233,9 @@ void processClientInitialParams(
         conn.d6d.state = D6DMachineState::BASE;
         conn.d6d.meta.lastNonSearchState = D6DMachineState::DISABLED;
         conn.d6d.meta.timeLastNonSearchState = Clock::now();
+
+        // Temporary, should be removed after transport knob pipeline works
+        conn.d6d.noBlackholeDetection = true;
       } else {
         LOG(ERROR) << "client d6dBasePMTU fails sanity check: " << *d6dBasePMTU;
         // We treat base pmtu transport param as client's swich to activate d6d,

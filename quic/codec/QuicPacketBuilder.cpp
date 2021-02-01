@@ -7,6 +7,7 @@
  */
 
 #include <quic/codec/QuicPacketBuilder.h>
+#include <algorithm>
 
 #include <folly/Random.h>
 #include <quic/codec/PacketNumber.h>
@@ -276,6 +277,71 @@ void RegularQuicPacketBuilder::accountForCipherOverhead(
   remainingBytes_ -= overhead;
 }
 
+PseudoRetryPacketBuilder::PseudoRetryPacketBuilder(
+    uint8_t initialByte,
+    ConnectionId sourceConnectionId,
+    ConnectionId destinationConnectionId,
+    ConnectionId originalDestinationConnectionId,
+    QuicVersion quicVersion,
+    Buf&& token)
+    : initialByte_(initialByte),
+      sourceConnectionId_(sourceConnectionId),
+      destinationConnectionId_(destinationConnectionId),
+      originalDestinationConnectionId_(originalDestinationConnectionId),
+      quicVersion_(quicVersion),
+      token_(std::move(token)) {
+  writePseudoRetryPacket();
+}
+
+void PseudoRetryPacketBuilder::writePseudoRetryPacket() {
+  uint8_t packetLength = sizeof(uint8_t) /* ODCID length */ +
+      originalDestinationConnectionId_.size() /* ODCID */ +
+      sizeof(uint8_t) /* Initial byte */ +
+      sizeof(QuicVersionType) /* Version */ +
+      sizeof(uint8_t) /* DCID length */ +
+      destinationConnectionId_.size() /* DCID */ +
+      sizeof(uint8_t) /* SCID length */ +
+      sourceConnectionId_.size() /* SCID */ + token_->length() /* Token */;
+
+  packetBuf_ = folly::IOBuf::create(packetLength);
+  BufWriter bufWriter(*packetBuf_, packetLength);
+
+  // ODCID length
+  bufWriter.writeBE<uint8_t>(originalDestinationConnectionId_.size());
+
+  // ODCID
+  bufWriter.push(
+      originalDestinationConnectionId_.data(),
+      originalDestinationConnectionId_.size());
+
+  // Initial byte
+  bufWriter.writeBE<uint8_t>(initialByte_);
+
+  // Version
+  bufWriter.writeBE<QuicVersionType>(
+      static_cast<QuicVersionType>(quicVersion_));
+
+  // DCID length
+  bufWriter.writeBE<uint8_t>(destinationConnectionId_.size());
+
+  // DCID
+  bufWriter.push(
+      destinationConnectionId_.data(), destinationConnectionId_.size());
+
+  // SCID length
+  bufWriter.writeBE<uint8_t>(sourceConnectionId_.size());
+
+  // SCID
+  bufWriter.push(sourceConnectionId_.data(), sourceConnectionId_.size());
+
+  // Token
+  bufWriter.push((const uint8_t*)token_->data(), token_->length());
+}
+
+Buf PseudoRetryPacketBuilder::buildPacket() && {
+  return std::move(packetBuf_);
+}
+
 StatelessResetPacketBuilder::StatelessResetPacketBuilder(
     uint16_t maxPacketSize,
     const StatelessResetToken& resetToken)
@@ -447,6 +513,56 @@ uint8_t VersionNegotiationPacketBuilder::generateRandomPacketType() const {
 
 bool VersionNegotiationPacketBuilder::canBuildPacket() const noexcept {
   return remainingBytes_ != 0;
+}
+
+RetryPacketBuilder::RetryPacketBuilder(
+    ConnectionId sourceConnectionId,
+    ConnectionId destinationConnectionId,
+    QuicVersion quicVersion,
+    std::string&& retryToken,
+    Buf&& integrityTag)
+    : sourceConnectionId_(sourceConnectionId),
+      destinationConnectionId_(destinationConnectionId),
+      quicVersion_(quicVersion),
+      retryToken_(std::move(retryToken)),
+      integrityTag_(std::move(integrityTag)),
+      remainingBytes_(kDefaultUDPSendPacketLen) {
+  writeRetryPacket();
+}
+
+void RetryPacketBuilder::writeRetryPacket() {
+  packetBuf_ = folly::IOBuf::create(kAppenderGrowthSize);
+
+  // Encode the portion of the retry packet that comes before the
+  // integrity tag.
+  BufAppender appender(packetBuf_.get(), kAppenderGrowthSize);
+  LongHeader header(
+      LongHeader::Types::Retry,
+      sourceConnectionId_,
+      destinationConnectionId_,
+      0 /* packet number, can be arbitrary for retry packets */,
+      quicVersion_,
+      retryToken_);
+  encodeLongHeaderHelper(header, appender, remainingBytes_, 0);
+  packetBuf_->coalesce();
+
+  // Encode the integrity tag.
+  if (remainingBytes_ <= kRetryIntegrityTagLen) {
+    // Not enough space to write the integrity tag
+    remainingBytes_ = 0;
+  } else {
+    remainingBytes_ -= kRetryIntegrityTagLen;
+    BufAppender appender2(packetBuf_.get(), kRetryIntegrityTagLen);
+    appender2.insert(std::move(integrityTag_));
+  }
+}
+
+bool RetryPacketBuilder::canBuildPacket() const noexcept {
+  return remainingBytes_ != 0;
+}
+
+Buf RetryPacketBuilder::buildPacket() && {
+  return std::move(packetBuf_);
 }
 
 InplaceQuicPacketBuilder::InplaceQuicPacketBuilder(

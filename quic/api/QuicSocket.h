@@ -19,6 +19,7 @@
 #include <quic/state/StateData.h>
 
 #include <chrono>
+#include "folly/Portability.h"
 
 namespace folly {
 class EventBase;
@@ -435,9 +436,21 @@ class QuicSocket {
   setKnob(uint64_t knobSpace, uint64_t knobId, Buf knobBlob) = 0;
 
   /**
+   * Can Knob Frames be exchanged with the peer on this connection?
+   */
+  FOLLY_NODISCARD virtual bool isKnobSupported() const = 0;
+
+  /**
    * Is partial reliability supported.
    */
   virtual bool isPartiallyReliableTransport() const = 0;
+
+  /**
+   * Set stream priority.
+   * level: can only be in [0, 7].
+   */
+  virtual folly::Expected<folly::Unit, LocalErrorCode>
+  setStreamPriority(StreamId id, PriorityLevel level, bool incremental) = 0;
 
   /**
    * ===== Read API ====

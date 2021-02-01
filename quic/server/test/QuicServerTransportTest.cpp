@@ -280,6 +280,16 @@ class TestingQuicServerTransport : public QuicServerTransport {
   auto& readLooper() {
     return readLooper_;
   }
+
+  void registerKnobParamHandler(
+      uint64_t paramId,
+      std::function<void(QuicServerConnectionState*, uint64_t)>&& handler) {
+    registerTransportKnobParamHandler(paramId, std::move(handler));
+  }
+
+  void handleKnobParams(const TransportKnobParams& params) {
+    handleTransportKnobParams(params);
+  }
 };
 
 class QuicServerTransportTest : public Test {
@@ -323,7 +333,8 @@ class QuicServerTransportTest : public Test {
     server->getNonConstConn().handshakeLayer.reset(fakeHandshake);
     server->getNonConstConn().serverHandshakeLayer = fakeHandshake;
     // Allow ignoring path mtu for testing negotiation.
-    server->getNonConstConn().transportSettings.canIgnorePathMTU = true;
+    server->getNonConstConn().transportSettings.canIgnorePathMTU =
+        getCanIgnorePathMTU();
     server->getNonConstConn().transportSettings.disableMigration =
         getDisableMigration();
     server->setConnectionIdAlgo(connIdAlgo_.get());
@@ -359,6 +370,10 @@ class QuicServerTransportTest : public Test {
   }
 
   virtual bool getDisableMigration() {
+    return true;
+  }
+
+  virtual bool getCanIgnorePathMTU() {
     return true;
   }
 
@@ -574,8 +589,10 @@ class QuicServerTransportTest : public Test {
 
   void verifyTransportParameters(std::chrono::milliseconds idleTimeout) {
     EXPECT_EQ(server->getConn().peerIdleTimeout, idleTimeout);
-    EXPECT_EQ(
-        server->getConn().udpSendPacketLen, fakeHandshake->maxRecvPacketSize);
+    if (getCanIgnorePathMTU()) {
+      EXPECT_EQ(
+          server->getConn().udpSendPacketLen, fakeHandshake->maxRecvPacketSize);
+    }
   }
 
   void deliverDataWithoutErrorCheck(
@@ -4244,6 +4261,66 @@ TEST_P(QuicServerTransportHandshakeTest, TestD6DStartInstrumentationCallback) {
   // CHLO should be enough to trigger probing
   recvClientHello();
   server->removeInstrumentationObserver(mockObserver.get());
+}
+
+TEST_F(QuicServerTransportTest, TestRegisterAndHandleTransportKnobParams) {
+  int flag = 0;
+  server->registerKnobParamHandler(
+      199, [&](QuicServerConnectionState* /* server_conn */, uint64_t val) {
+        EXPECT_EQ(val, 10);
+        flag = 1;
+      });
+  server->registerKnobParamHandler(
+      200,
+      [&](QuicServerConnectionState* /* server_conn */, uint64_t /* val */) {
+        flag = 2;
+      });
+  server->handleKnobParams({
+      {199, 10},
+      {201, 20},
+  });
+
+  EXPECT_EQ(flag, 1);
+
+  // ovewrite will fail, the new handler won't be called
+  server->registerKnobParamHandler(
+      199, [&](QuicServerConnectionState* /* server_conn */, uint64_t val) {
+        EXPECT_EQ(val, 30);
+        flag = 3;
+      });
+
+  server->handleKnobParams({
+      {199, 10},
+      {201, 20},
+  });
+  EXPECT_EQ(flag, 1);
+}
+
+TEST_F(QuicServerTransportTest, TestRegisterPMTUZeroBlackholeDetection) {
+  server->handleKnobParams(
+      {{static_cast<uint64_t>(
+            TransportKnobParamId::ZERO_PMTU_BLACKHOLE_DETECTION),
+        1}});
+  EXPECT_TRUE(server->getConn().d6d.noBlackholeDetection);
+}
+
+class QuicServerTransportForciblySetUDUPayloadSizeTest
+    : public QuicServerTransportTest {
+ public:
+  bool getCanIgnorePathMTU() override {
+    return false;
+  }
+};
+
+TEST_F(
+    QuicServerTransportForciblySetUDUPayloadSizeTest,
+    TestHandleTransportKnobParamForciblySetUDPPayloadSize) {
+  EXPECT_LT(server->getConn().udpSendPacketLen, 1452);
+  server->handleKnobParams(
+      {{static_cast<uint64_t>(
+            TransportKnobParamId::FORCIBLY_SET_UDP_PAYLOAD_SIZE),
+        1}});
+  EXPECT_EQ(server->getConn().udpSendPacketLen, 1452);
 }
 
 } // namespace test

@@ -2874,13 +2874,13 @@ void QuicTransportBase::updateCongestionControlSettings(
       transportSettings.pacingTimerTickInterval;
   conn_->transportSettings.minBurstPackets = transportSettings.minBurstPackets;
   conn_->transportSettings.copaDeltaParam = transportSettings.copaDeltaParam;
+  conn_->transportSettings.copaUseRttStanding =
+      transportSettings.copaUseRttStanding;
 }
 
 folly::Expected<folly::Unit, LocalErrorCode>
 QuicTransportBase::setKnob(uint64_t knobSpace, uint64_t knobId, Buf knobBlob) {
-  // TODO: If we decide to support Knob frame on non-MVFST Quic versions,
-  // we have to implement it as a TransportParameter
-  if (conn_->version && *(conn_->version) == QuicVersion::MVFST) {
+  if (isKnobSupported()) {
     sendSimpleFrame(*conn_, KnobFrame(knobSpace, knobId, std::move(knobBlob)));
     return folly::unit;
   }
@@ -2889,12 +2889,46 @@ QuicTransportBase::setKnob(uint64_t knobSpace, uint64_t knobId, Buf knobBlob) {
   return folly::makeUnexpected(LocalErrorCode::KNOB_FRAME_UNSUPPORTED);
 }
 
+bool QuicTransportBase::isKnobSupported() const {
+  // We determine that the peer supports knob frames by looking at the
+  // negotiated QUIC version.
+  // TODO: This is temporary. Soon, we will add a transport parameter for knob
+  // support and incorporate it into the check, such that if the QUIC version
+  // increases/changes, this method will still continue to work, based on the
+  // transport parameter setting.
+  return (conn_->version && (*(conn_->version) == QuicVersion::MVFST));
+}
+
 const TransportSettings& QuicTransportBase::getTransportSettings() const {
   return conn_->transportSettings;
 }
 
 bool QuicTransportBase::isPartiallyReliableTransport() const {
   return conn_->partialReliabilityEnabled;
+}
+
+folly::Expected<folly::Unit, LocalErrorCode>
+QuicTransportBase::setStreamPriority(
+    StreamId id,
+    PriorityLevel level,
+    bool incremental) {
+  if (closeState_ != CloseState::OPEN) {
+    return folly::makeUnexpected(LocalErrorCode::CONNECTION_CLOSED);
+  }
+  if (level > kDefaultMaxPriority) {
+    return folly::makeUnexpected(LocalErrorCode::INVALID_OPERATION);
+  }
+  if (!conn_->streamManager->streamExists(id)) {
+    // It's not an error to try to prioritize a non-existent stream.
+    return folly::unit;
+  }
+  // It's not an error to prioritize a stream after it's sent its FIN - this
+  // can reprioritize retransmissions.
+  conn_->streamManager->setStreamPriority(id, level, incremental);
+  if (conn_->qLogger) {
+    conn_->qLogger->addPriorityUpdate(id, level, incremental);
+  }
+  return folly::unit;
 }
 
 void QuicTransportBase::setCongestionControl(CongestionControlType type) {

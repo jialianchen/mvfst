@@ -11,6 +11,7 @@
 #include <quic/api/QuicTransportBase.h>
 #include <quic/api/QuicTransportFunctions.h>
 #include <quic/codec/ConnectionIdAlgo.h>
+#include <quic/common/TransportKnobs.h>
 #include <quic/congestion_control/CongestionControllerFactory.h>
 #include <quic/server/handshake/ServerTransportParametersExtension.h>
 #include <quic/server/state/ServerConnectionIdRejector.h>
@@ -132,6 +133,15 @@ class QuicServerTransport
   // From ServerHandshake::HandshakeCallback
   virtual void onCryptoEventAvailable() noexcept override;
 
+  void onTransportKnobs(Buf knobBlob) override;
+
+  void handleTransportKnobParams(const TransportKnobParams& params);
+
+  // Made it protected for testing purpose
+  void registerTransportKnobParamHandler(
+      uint64_t paramId,
+      std::function<void(QuicServerConnectionState*, uint64_t)>&& handler);
+
  private:
   void processPendingData(bool async);
   void maybeNotifyTransportReady();
@@ -140,6 +150,7 @@ class QuicServerTransport
   void maybeIssueConnectionIds();
   bool hasReadCipher() const;
   void maybeStartD6DProbing();
+  void registerAllTransportKnobParamHandlers();
 
  private:
   RoutingCallback* routingCb_{nullptr};
@@ -149,5 +160,9 @@ class QuicServerTransport
   bool newSessionTicketWritten_{false};
   bool connectionIdsIssued_{false};
   QuicServerConnectionState* serverConn_;
+  std::unordered_map<
+      uint64_t,
+      std::function<void(QuicServerConnectionState*, uint64_t)>>
+      transportKnobParamHandlers_;
 };
 } // namespace quic

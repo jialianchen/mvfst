@@ -7,12 +7,19 @@
  */
 
 #include <folly/Format.h>
+#include <folly/chrono/Conv.h>
 #include <folly/io/Cursor.h>
 #include <folly/io/SocketOptionMap.h>
 #include <folly/system/ThreadId.h>
 #include <quic/QuicConstants.h>
 #include <quic/common/SocketUtil.h>
 #include <quic/common/Timers.h>
+
+#ifdef FOLLY_HAVE_MSG_ERRQUEUE
+#include <linux/net_tstamp.h>
+#else
+#define SOF_TIMESTAMPING_SOFTWARE 0
+#endif
 
 #include <quic/server/AcceptObserver.h>
 #include <quic/server/CCPReader.h>
@@ -42,12 +49,16 @@ void QuicServerWorker::setSocket(
   evb_ = socket_->getEventBase();
 }
 
-void QuicServerWorker::bind(const folly::SocketAddress& address) {
+void QuicServerWorker::bind(
+    const folly::SocketAddress& address,
+    folly::AsyncUDPSocket::BindOptions bindOptions) {
   DCHECK(!supportedVersions_.empty());
   CHECK(socket_);
   if (setEventCallback_) {
     socket_->setEventCallback(this);
   }
+  // TODO this totally doesn't work, we can't apply socket options before
+  // bind, since bind creates the fd.
   if (socketOptions_) {
     applySocketOptions(
         *socket_.get(),
@@ -55,7 +66,7 @@ void QuicServerWorker::bind(const folly::SocketAddress& address) {
         address.getFamily(),
         folly::SocketOptionKey::ApplyPos::PRE_BIND);
   }
-  socket_->bind(address);
+  socket_->bind(address, bindOptions);
   if (socketOptions_) {
     applySocketOptions(
         *socket_.get(),
@@ -73,6 +84,7 @@ void QuicServerWorker::bind(const folly::SocketAddress& address) {
           : kMaxNumGROBuffers;
     }
   }
+  socket_->setTimestamping(SOF_TIMESTAMPING_SOFTWARE);
 }
 
 void QuicServerWorker::applyAllSocketOptions() {
@@ -221,9 +233,27 @@ void QuicServerWorker::onDataAvailable(
     size_t len,
     bool truncated,
     OnDataAvailableParams params) noexcept {
-  // TODO: we can get better receive time accuracy than this, with
-  // SO_TIMESTAMP or SIOCGSTAMP.
   auto packetReceiveTime = Clock::now();
+  auto originalPacketReceiveTime = packetReceiveTime;
+  if (params.ts) {
+    // This is the software system time from the datagram.
+    auto packetNowDuration =
+        folly::to<std::chrono::microseconds>(params.ts.value()[0]);
+    auto wallNowDuration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::system_clock::now().time_since_epoch());
+    auto durationSincePacketNow = wallNowDuration - packetNowDuration;
+    if (packetNowDuration != 0us && durationSincePacketNow > 0us) {
+      packetReceiveTime -= durationSincePacketNow;
+    }
+  }
+  // System time can move backwards, so we want to make sure that the receive
+  // time we are using is monotonic relative to itself.
+  if (packetReceiveTime < largestPacketReceiveTime_) {
+    packetReceiveTime = originalPacketReceiveTime;
+  }
+  largestPacketReceiveTime_ =
+      std::max(largestPacketReceiveTime_, packetReceiveTime);
   VLOG(10) << folly::format(
       "Worker={}, Received data on thread={}, processId={}",
       this,
@@ -234,7 +264,7 @@ void QuicServerWorker::onDataAvailable(
   // we've flushed it.
   Buf data = std::move(readBuffer_);
 
-  if (params.gro_ <= 0) {
+  if (params.gro <= 0) {
     if (truncated) {
       // This is an error, drop the packet.
       return;
@@ -249,7 +279,7 @@ void QuicServerWorker::onDataAvailable(
     // AsyncUDPSocket::handleRead() sets the len to be the
     // buffer size in case the data is truncated
     if (truncated) {
-      len -= len % params.gro_;
+      len -= len % params.gro;
     }
 
     data->append(len);
@@ -259,17 +289,17 @@ void QuicServerWorker::onDataAvailable(
     size_t remaining = len;
     size_t offset = 0;
     while (remaining) {
-      if (static_cast<int>(remaining) > params.gro_) {
+      if (static_cast<int>(remaining) > params.gro) {
         auto tmp = data->cloneOne();
         // start at offset
         tmp->trimStart(offset);
         // the actual len is len - offset now
         // leave params.gro_ bytes
-        tmp->trimEnd(len - offset - params.gro_);
-        DCHECK_EQ(tmp->length(), params.gro_);
+        tmp->trimEnd(len - offset - params.gro);
+        DCHECK_EQ(tmp->length(), params.gro);
 
-        offset += params.gro_;
-        remaining -= params.gro_;
+        offset += params.gro;
+        remaining -= params.gro;
         handleNetworkData(client, std::move(tmp), packetReceiveTime);
       } else {
         // do not clone the last packet
@@ -429,7 +459,7 @@ void QuicServerWorker::eventRecvmsgCallback(MsgHdr* msgHdr, int res) {
         reinterpret_cast<sockaddr*>(msg.msg_name), msg.msg_namelen);
 
     OnDataAvailableParams params;
-    params.gro_ = gro;
+    params.gro = gro;
     onDataAvailable(addr, bytesRead, truncated, params);
   }
   msgHdr_.reset(msgHdr);
@@ -1178,6 +1208,27 @@ void QuicServerWorker::getAllConnectionsStats(
         conn->lossState.rttvar);
     connStats.peerAckDelayExponent = conn->peerAckDelayExponent;
     connStats.udpSendPacketLen = conn->udpSendPacketLen;
+    if (conn->streamManager) {
+      connStats.numStreams = conn->streamManager->streams().size();
+    }
+
+    if (conn->clientChosenDestConnectionId.hasValue()) {
+      connStats.clientChosenDestConnectionId =
+          conn->clientChosenDestConnectionId->hex();
+    }
+    if (conn->clientConnectionId.hasValue()) {
+      connStats.clientConnectionId = conn->clientConnectionId->hex();
+    }
+    if (conn->serverConnectionId.hasValue()) {
+      connStats.serverConnectionId = conn->serverConnectionId->hex();
+    }
+
+    connStats.totalBytesSent = conn->lossState.totalBytesSent;
+    connStats.totalBytesReceived = conn->lossState.totalBytesRecvd;
+    connStats.totalBytesRetransmitted = conn->lossState.totalBytesRetransmitted;
+    if (conn->version.hasValue()) {
+      connStats.version = static_cast<uint32_t>(*conn->version);
+    }
     stats.emplace_back(connStats);
   }
 }
